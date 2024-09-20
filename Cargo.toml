@@ -1,0 +1,9 @@
+[package]
+name = "avj-chess-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dexterws-chess = { git = "https://github.com/INDA24PlusPlus/dexterws-chess.git" }
+ggez = "0.9.3"
+
