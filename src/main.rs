@@ -1,10 +1,11 @@
 use std::{collections::HashMap, env, path, time::Duration};
 
 use conf::WindowMode;
-use dexterws_chess::game::{Board, Color as PieceColor, Piece, Square};
+use dexterws_chess::game::{Board, Color as PieceColor, Move, Piece, Square};
+use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
-use graphics::{Color, DrawParam, MeshBuilder};
+use graphics::{Color, DrawParam, FillOptions, MeshBuilder};
 use mint::Point2;
 
 struct State {
@@ -12,6 +13,9 @@ struct State {
     rect: graphics::Mesh,
     board: Board,
     piece_images: [Option<graphics::Image>; 64],
+    mouse_down: bool,
+    current_legal_moves: Option<Vec<Move>>,
+    selected_square: Option<Square>,
 }
 
 fn piece_to_image(piece: (Piece, PieceColor)) -> String {
@@ -76,10 +80,10 @@ fn draw_board(mb: &mut MeshBuilder) {
             mb.rectangle(
                 graphics::DrawMode::fill(),
                 graphics::Rect::new(
-                    100.0 + (j as f32 * 120.0),
-                    100.0 + (i as f32 * 120.0),
-                    120.0,
-                    120.0,
+                    100.0 + (j as f32 * 80.0),
+                    100.0 + (i as f32 * 80.0),
+                    80.0,
+                    80.0,
                 ),
                 if (i + j) % 2 == 1 {
                     black_square_color
@@ -112,6 +116,9 @@ impl State {
             rect,
             board,
             piece_images,
+            mouse_down: false,
+            current_legal_moves: None,
+            selected_square: None,
         };
 
         Ok(s)
@@ -122,6 +129,58 @@ impl event::EventHandler<ggez::GameError> for State {
     fn update(&mut self, ctx: &mut Context) -> GameResult {
         const DESIRED_FPS: u32 = 60;
 
+        Ok(())
+    }
+
+    fn mouse_button_down_event(
+        &mut self,
+        ctx: &mut Context,
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    ) -> GameResult {
+        self.mouse_down = true;
+
+        if x < 740.0 && y < 740.0 && x > 100.0 && y > 100.0 {
+            let file: u8 = ((x - 110.0) / 80.0) as u8;
+            let rank: u8 = ((y - 110.0) / 80.0) as u8;
+            println!("{}, {}, x: {}, y: {}", file, rank, x, y);
+            let index = (rank * 8) + file;
+
+            let square = Square::from_idx(index);
+
+            if self.current_legal_moves.is_some()
+                && self
+                    .current_legal_moves
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m.to().file.to_idx() == file && m.to().rank.to_idx() == rank)
+                    .is_some()
+            {
+                let selected_move = self
+                    .current_legal_moves
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m.to().file.to_idx() == file && m.to().rank.to_idx() == rank)
+                    .unwrap();
+
+                self.board.make_move(*selected_move).unwrap();
+                let pieces = self.board.get_all_pieces();
+                let piece_images: [Option<graphics::Image>; 64] = pieces.map(|piece| match piece {
+                    Some(p) => Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap()),
+                    None => None,
+                });
+                self.piece_images = piece_images;
+                self.current_legal_moves = None;
+            } else {
+                // We are inside the board
+                let legal_moves = self.board.get_moves(square);
+                self.current_legal_moves = legal_moves;
+                self.selected_square = Some(square);
+            }
+        }
         Ok(())
     }
 
@@ -136,8 +195,8 @@ impl event::EventHandler<ggez::GameError> for State {
         for (index, image) in self.piece_images.iter().enumerate() {
             if image.is_some() {
                 let square = Square::from_idx(index as u8);
-                let x_pos: f32 = 160.0 + (120.0 * (square.file.to_idx() as f32));
-                let y_pos: f32 = 160.0 + (120.0 * (square.rank.to_idx() as f32));
+                let x_pos: f32 = 110.0 + (80.0 * (square.file.to_idx() as f32));
+                let y_pos: f32 = 110.0 + (80.0 * (square.rank.to_idx() as f32));
                 let image_destination = glam::Vec2::new(x_pos, y_pos);
                 let piece_image = image.as_ref().unwrap();
 
@@ -147,7 +206,24 @@ impl event::EventHandler<ggez::GameError> for State {
                 );
             }
         }
+        if self.current_legal_moves.is_some() {
+            for legal_move in self.current_legal_moves.as_ref().unwrap() {
+                let new_position = Vec2::new(
+                    140.0 + (80.0 * (legal_move.to().file.to_idx() as f32)),
+                    140.0 + (80.0 * (legal_move.to().rank.to_idx() as f32)),
+                );
 
+                let circle = graphics::Mesh::new_circle(
+                    ctx,
+                    graphics::DrawMode::Fill(FillOptions::default()),
+                    new_position,
+                    20.0,
+                    1.0,
+                    Color::RED,
+                )?;
+                canvas.draw(&circle, graphics::DrawParam::default().z(99));
+            }
+        }
         // Draw an image with some options, and different filter modes.
 
         canvas.set_default_sampler();
