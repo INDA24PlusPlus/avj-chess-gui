@@ -2,7 +2,7 @@ use std::{collections::HashMap, env, fmt::Debug, path, time::Duration};
 
 use conf::WindowMode;
 use dexterws_chess::game::{
-    Board, Color as PieceColor, GameResult as ChesResult, Move, Piece, Square,
+    Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square,
 };
 use event::MouseButton;
 use ggez::*;
@@ -171,7 +171,8 @@ impl event::EventHandler<ggez::GameError> for State {
                     .unwrap();
 
                 self.board.make_move(*selected_move).unwrap();
-                self.past_moves.push((self.board.side(), *selected_move));
+                self.past_moves
+                    .insert(0, (self.board.side(), *selected_move));
                 let pieces: [Option<(Piece, PieceColor)>; 64] = self.board.get_all_pieces();
                 let piece_images: [Option<graphics::Image>; 64] = pieces.map(|piece| match piece {
                     Some(p) => Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap()),
@@ -201,11 +202,59 @@ impl event::EventHandler<ggez::GameError> for State {
         // Draw an image.
         //canvas.draw(&self.image, graphics::DrawParam::new().dest(dst));
 
+        let status_text = match self.board.get_game_result() {
+            ChessResult::Checkmate {
+                winner: PieceColor::White,
+            } => Text::new("Black in checkmate, white has won"),
+            ChessResult::Checkmate {
+                winner: PieceColor::Black,
+            } => Text::new("White in checkmate, black has won"),
+            ChessResult::Draw => Text::new("Game has been drawed"),
+            ChessResult::FiftyMoveRule => Text::new("Game has been drawed due to 50 move rule"),
+            ChessResult::ThreefoldRepetition => {
+                Text::new("Game has been drawed due to three fold repition")
+            }
+            ChessResult::Stalemate => Text::new("Game has been drawed due to stalemate "),
+            ChessResult::InProgress => Text::new("Game in progress"),
+        };
+
+        status_text.draw(
+            &mut canvas,
+            graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 40.0)),
+        );
+
         let side_text = Text::new(String::from(color) + " to move");
         side_text.draw(
             &mut canvas,
             graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 70.0)),
         );
+
+        for (index, piece_move) in self.past_moves.iter().enumerate() {
+            let text_position = glam::Vec2::new(900.0, 110.0 + ((index as f32) * 40.0));
+            let circle_position = glam::Vec2::new(880.0, 110.0 + ((index as f32) * 40.0));
+            let circle_color = if piece_move.0 == PieceColor::Black {
+                Color::new(1.0, 1.0, 1.0, 1.0)
+            } else {
+                Color::new(0.0, 0.0, 0.0, 1.0)
+            };
+
+            let color_circle = graphics::Mesh::new_circle(
+                ctx,
+                graphics::DrawMode::Fill(FillOptions::default()),
+                circle_position,
+                10.0,
+                1.0,
+                circle_color,
+            )?;
+
+            let text = Text::new(piece_move.1.to_string());
+
+            color_circle.draw(&mut canvas, graphics::DrawParam::default());
+            text.draw(
+                &mut canvas,
+                graphics::DrawParam::default().dest(text_position),
+            );
+        }
 
         canvas.set_sampler(graphics::Sampler::nearest_clamp());
         for (index, image) in self.piece_images.iter().enumerate() {
