@@ -1,11 +1,13 @@
-use std::{collections::HashMap, env, path, time::Duration};
+use std::{collections::HashMap, env, fmt::Debug, path, time::Duration};
 
 use conf::WindowMode;
-use dexterws_chess::game::{Board, Color as PieceColor, Move, Piece, Square};
+use dexterws_chess::game::{
+    Board, Color as PieceColor, GameResult as ChesResult, Move, Piece, Square,
+};
 use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
-use graphics::{Color, DrawParam, FillOptions, MeshBuilder};
+use graphics::{Color, DrawParam, Drawable, FillOptions, MeshBuilder, Text};
 use mint::Point2;
 
 struct State {
@@ -16,6 +18,7 @@ struct State {
     mouse_down: bool,
     current_legal_moves: Option<Vec<Move>>,
     selected_square: Option<Square>,
+    past_moves: Vec<(PieceColor, Move)>,
 }
 
 fn piece_to_image(piece: (Piece, PieceColor)) -> String {
@@ -119,6 +122,7 @@ impl State {
             mouse_down: false,
             current_legal_moves: None,
             selected_square: None,
+            past_moves: vec![],
         };
 
         Ok(s)
@@ -167,7 +171,8 @@ impl event::EventHandler<ggez::GameError> for State {
                     .unwrap();
 
                 self.board.make_move(*selected_move).unwrap();
-                let pieces = self.board.get_all_pieces();
+                self.past_moves.push((self.board.side(), *selected_move));
+                let pieces: [Option<(Piece, PieceColor)>; 64] = self.board.get_all_pieces();
                 let piece_images: [Option<graphics::Image>; 64] = pieces.map(|piece| match piece {
                     Some(p) => Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap()),
                     None => None,
@@ -187,9 +192,20 @@ impl event::EventHandler<ggez::GameError> for State {
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
         let mut canvas =
             graphics::Canvas::from_frame(ctx, graphics::Color::from([0.1, 0.2, 0.3, 1.0]));
+        let color = if self.board.side() == PieceColor::Black {
+            "Black"
+        } else {
+            "White"
+        };
 
         // Draw an image.
         //canvas.draw(&self.image, graphics::DrawParam::new().dest(dst));
+
+        let side_text = Text::new(String::from(color) + " to move");
+        side_text.draw(
+            &mut canvas,
+            graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 70.0)),
+        );
 
         canvas.set_sampler(graphics::Sampler::nearest_clamp());
         for (index, image) in self.piece_images.iter().enumerate() {
@@ -217,9 +233,9 @@ impl event::EventHandler<ggez::GameError> for State {
                     ctx,
                     graphics::DrawMode::Fill(FillOptions::default()),
                     new_position,
-                    20.0,
+                    10.0,
                     1.0,
-                    Color::RED,
+                    Color::new(0.658, 0.654, 0.639, 1.0),
                 )?;
                 canvas.draw(&circle, graphics::DrawParam::default().z(99));
             }
