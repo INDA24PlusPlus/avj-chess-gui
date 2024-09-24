@@ -99,6 +99,25 @@ fn draw_board(mb: &mut MeshBuilder) {
     }
 }
 
+fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
+    let button = graphics::Mesh::new_rectangle(
+        ctx,
+        graphics::DrawMode::fill(),
+        graphics::Rect::new(400.0, 800.0, 120.0, 40.0),
+        graphics::Color::new(1.0, 0.0, 0.0, 1.0),
+    )
+    .unwrap();
+
+    let button_text = Text::new("Restart game");
+    let text_position = glam::Vec2::new(410.0, 810.0);
+
+    button.draw(canvas, graphics::DrawParam::default());
+    button_text.draw(
+        canvas,
+        graphics::DrawParam::default().z(100).dest(text_position),
+    );
+}
+
 impl State {
     fn new(ctx: &mut Context) -> GameResult<State> {
         //let image = graphics::Image::from_path(ctx, "/white_square.png")?;
@@ -187,11 +206,25 @@ impl event::EventHandler<ggez::GameError> for State {
                 self.selected_square = Some(square);
             }
         }
+
+        // restart button has been pressed
+        if x >= 410.0 && x <= 530.0 && y >= 800.0 && y <= 840.0 {
+            self.current_legal_moves = Some(vec![]);
+            self.past_moves = vec![];
+            self.selected_square = None;
+            self.board = Board::new();
+            let piece_images: [Option<graphics::Image>; 64] =
+                self.board.get_all_pieces().map(|piece| match piece {
+                    Some(p) => Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap()),
+                    None => None,
+                });
+            self.piece_images = piece_images;
+        }
         Ok(())
     }
 
     fn draw(&mut self, ctx: &mut Context) -> GameResult {
-        let mut canvas =
+        let mut canvas: graphics::Canvas =
             graphics::Canvas::from_frame(ctx, graphics::Color::from([0.1, 0.2, 0.3, 1.0]));
         let color = if self.board.side() == PieceColor::Black {
             "Black"
@@ -223,14 +256,19 @@ impl event::EventHandler<ggez::GameError> for State {
             graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 40.0)),
         );
 
-        let side_text = Text::new(String::from(color) + " to move");
-        side_text.draw(
-            &mut canvas,
-            graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 70.0)),
-        );
+        if self.board.get_game_result() == ChessResult::InProgress {
+            let side_text = Text::new(String::from(color) + " to move");
+            side_text.draw(
+                &mut canvas,
+                graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 70.0)),
+            );
+        }
+
+        // restart button
+        draw_restart_button(&mut canvas, ctx);
 
         for (index, piece_move) in self.past_moves.iter().enumerate() {
-            let text_position = glam::Vec2::new(900.0, 110.0 + ((index as f32) * 40.0));
+            let text_position = glam::Vec2::new(900.0, 105.0 + ((index as f32) * 40.0));
             let circle_position = glam::Vec2::new(880.0, 110.0 + ((index as f32) * 40.0));
             let circle_color = if piece_move.0 == PieceColor::Black {
                 Color::new(1.0, 1.0, 1.0, 1.0)
