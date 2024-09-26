@@ -1,8 +1,9 @@
 use std::{collections::HashMap, env, fmt::Debug, path, time::Duration};
 
 use conf::WindowMode;
-use dexterws_chess::game::{
-    Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square,
+use dexterws_chess::{
+    game::{Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square},
+    square,
 };
 use event::MouseButton;
 use ggez::*;
@@ -100,16 +101,17 @@ fn draw_board(mb: &mut MeshBuilder) {
 }
 
 fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
-    let button = graphics::Mesh::new_rectangle(
+    let button = graphics::Mesh::new_rounded_rectangle(
         ctx,
         graphics::DrawMode::fill(),
-        graphics::Rect::new(400.0, 800.0, 120.0, 40.0),
+        graphics::Rect::new(640.0, 800.0, 110.0, 40.0),
+        5.0,
         graphics::Color::new(1.0, 0.0, 0.0, 1.0),
     )
     .unwrap();
 
-    let button_text = Text::new("Restart/new game");
-    let text_position = glam::Vec2::new(410.0, 810.0);
+    let button_text = Text::new("New game +");
+    let text_position = glam::Vec2::new(650.0, 810.0);
 
     button.draw(canvas, graphics::DrawParam::default());
     button_text.draw(
@@ -208,7 +210,7 @@ impl event::EventHandler<ggez::GameError> for State {
         }
 
         // restart button has been pressed
-        if x >= 410.0 && x <= 530.0 && y >= 800.0 && y <= 840.0 {
+        if x >= 640.0 && x <= 750.0 && y >= 800.0 && y <= 840.0 {
             self.current_legal_moves = Some(vec![]);
             self.past_moves = vec![];
             self.selected_square = None;
@@ -256,6 +258,23 @@ impl event::EventHandler<ggez::GameError> for State {
             }
             ChessResult::InProgress => Text::new("Game in progress"),
         };
+
+        // display rank and file
+        for i in 0..8 {
+            // display rank
+            let rank_text = Text::new((i + 1).to_string());
+            rank_text.draw(
+                &mut canvas,
+                graphics::DrawParam::new().dest(glam::Vec2::new(80.0, 130.0 + ((i as f32) * 80.0))),
+            );
+            // display file
+            let file_text = Text::new(((b'a' + i as u8) as char).to_string());
+            file_text.draw(
+                &mut canvas,
+                graphics::DrawParam::new()
+                    .dest(glam::Vec2::new(130.0 + ((i as f32) * 80.0), 750.0)),
+            );
+        }
 
         status_text.draw(
             &mut canvas,
