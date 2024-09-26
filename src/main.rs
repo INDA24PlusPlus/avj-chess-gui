@@ -108,7 +108,7 @@ fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
     )
     .unwrap();
 
-    let button_text = Text::new("Restart game");
+    let button_text = Text::new("Restart/new game");
     let text_position = glam::Vec2::new(410.0, 810.0);
 
     button.draw(canvas, graphics::DrawParam::default());
@@ -238,16 +238,22 @@ impl event::EventHandler<ggez::GameError> for State {
         let status_text = match self.board.get_game_result() {
             ChessResult::Checkmate {
                 winner: PieceColor::White,
-            } => Text::new("Black in checkmate, white has won"),
+            } => Text::new("Black in checkmate, white has won. Press restart to start new game."),
             ChessResult::Checkmate {
                 winner: PieceColor::Black,
-            } => Text::new("White in checkmate, black has won"),
-            ChessResult::Draw => Text::new("Game has been drawed"),
-            ChessResult::FiftyMoveRule => Text::new("Game has been drawed due to 50 move rule"),
-            ChessResult::ThreefoldRepetition => {
-                Text::new("Game has been drawed due to three fold repition")
+            } => Text::new("White in checkmate, black has won. Press restart to start new game"),
+            ChessResult::Draw => {
+                Text::new("Game has been drawed. Press restart to start new game.")
             }
-            ChessResult::Stalemate => Text::new("Game has been drawed due to stalemate "),
+            ChessResult::FiftyMoveRule => Text::new(
+                "Game has been drawed due to 50 move rule. Press restart to start new game",
+            ),
+            ChessResult::ThreefoldRepetition => Text::new(
+                "Game has been drawed due to three fold repition. Press restart to start new game",
+            ),
+            ChessResult::Stalemate => {
+                Text::new("Game has been drawed due to stalemate. Press restart to start new game")
+            }
             ChessResult::InProgress => Text::new("Game in progress"),
         };
 
