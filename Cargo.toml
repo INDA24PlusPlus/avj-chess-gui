@@ -6,4 +6,12 @@ edition = "2021"
 [dependencies]
 dexterws-chess = { git = "https://github.com/INDA24PlusPlus/dexterws-chess.git" }
 ggez = "0.9.3"
+chess-networking = { git = "https://github.com/INDA24PlusPlus/chess-networking.git" }
 
+[[bin]]
+name = "avj-chess-gui-1"
+path = "src/main.rs"
+
+[[bin]]
+name = "avj-chess-gui-2"
+path = "src/main.rs"

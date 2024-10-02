@@ -1,15 +1,21 @@
-use std::{collections::HashMap, env, fmt::Debug, path, time::Duration};
+use std::io::{ErrorKind, Write};
+use std::{
+    collections::HashMap,
+    env,
+    io::Read,
+    net::{SocketAddr, TcpListener, TcpStream},
+    path,
+};
 
+use chess_networking::Start;
 use conf::WindowMode;
-use dexterws_chess::{
-    game::{Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square},
-    square,
+use dexterws_chess::game::{
+    Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square,
 };
 use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
-use graphics::{Color, DrawParam, Drawable, FillOptions, MeshBuilder, Text};
-use mint::Point2;
+use graphics::{Color, Drawable, FillOptions, MeshBuilder, Text};
 
 struct State {
     //    image: graphics::Image,
@@ -20,6 +26,109 @@ struct State {
     current_legal_moves: Option<Vec<Move>>,
     selected_square: Option<Square>,
     past_moves: Vec<(PieceColor, Move)>,
+    // None = not connected, true = host, false = join
+    is_host: Option<bool>,
+    selected_color: Option<PieceColor>,
+}
+
+fn handle_client(mut stream: TcpStream, state: &mut State) {
+    let mut buf = vec![];
+    match stream.set_nonblocking(true) {
+        Ok(_) => (),
+        Err(e) => println!("Error setting nonblocking: {}", e),
+    }
+    loop {
+        println!("Looping");
+        match stream.read_to_end(&mut buf) {
+            Ok(_) => {
+                println!("Client start received");
+                break;
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                println!("WouldBlock");
+                continue;
+            }
+            Err(e) => panic!("encountered IO error: {e}"),
+        };
+    }
+
+    match Start::try_from(&buf[..]) {
+        Ok(start) => {
+            println!("Host start: {:?}", start);
+            let client_start = Start {
+                is_white: state.selected_color.unwrap() == PieceColor::White,
+                name: None,
+                fen: None,
+                time: None,
+                inc: None,
+            };
+            let client_start_bytes: Vec<u8> = client_start.try_into().unwrap();
+            println!("Host sending client start: {}", client_start_bytes.len());
+            match stream.write(&client_start_bytes) {
+                Ok(_) => println!("Client confirmed start sent"),
+                Err(e) => println!("Error sending client start: {}", e),
+            }
+        }
+        Err(e) => println!("Error host parsing start: {}", e),
+    }
+}
+
+fn listen_for_connections(state: &mut State) {
+    let addrs = [
+        SocketAddr::from(([127, 0, 0, 1], 8080)),
+        SocketAddr::from(([127, 0, 0, 1], 8081)),
+    ];
+    let listener = TcpListener::bind(&addrs[..]).unwrap();
+
+    let (stream, _addr) = listener.accept().unwrap();
+
+    handle_client(stream, state);
+}
+
+fn connect_to_host(address: String, state: &mut State) {
+    let mut stream = TcpStream::connect(address).unwrap();
+    match stream.set_nonblocking(true) {
+        Ok(_) => (),
+        Err(e) => println!("Error setting nonblocking: {}", e),
+    }
+
+    let start = Start {
+        is_white: false,
+        name: None,
+        fen: None,
+        time: None,
+        inc: None,
+    };
+    let start_bytes: Vec<u8> = start.try_into().unwrap();
+    match stream.write(&start_bytes) {
+        Ok(_) => println!("Client start sent"),
+        Err(e) => println!("Error sending client start: {}", e),
+    }
+
+    let mut buf = vec![];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(size) => {
+                println!("Client received host start confirmation: {}", size);
+                break;
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                println!("Connection    would block");
+                continue;
+            }
+            Err(e) => panic!("encountered IO error: {e}"),
+        }
+    }
+
+    println!("Client received buffer size: {}", buf.len());
+
+    match Start::try_from(&buf[..]) {
+        Ok(start) => {
+            println!("Client confirmed start struct: {:?}", start);
+            state.is_host = Some(false);
+        }
+        Err(e) => println!("Client parse error: {}", e),
+    }
 }
 
 fn piece_to_image(piece: (Piece, PieceColor)) -> String {
@@ -101,22 +210,41 @@ fn draw_board(mb: &mut MeshBuilder) {
 }
 
 fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
-    let button = graphics::Mesh::new_rounded_rectangle(
+    let button_host = graphics::Mesh::new_rounded_rectangle(
         ctx,
         graphics::DrawMode::fill(),
-        graphics::Rect::new(640.0, 800.0, 110.0, 40.0),
+        graphics::Rect::new(640.0, 800.0, 150.0, 40.0),
+        5.0,
+        graphics::Color::new(1.0, 0.0, 0.0, 1.0),
+    )
+    .unwrap();
+    let button_join = graphics::Mesh::new_rounded_rectangle(
+        ctx,
+        graphics::DrawMode::fill(),
+        graphics::Rect::new(640.0, 850.0, 150.0, 40.0),
         5.0,
         graphics::Color::new(1.0, 0.0, 0.0, 1.0),
     )
     .unwrap();
 
-    let button_text = Text::new("New game +");
-    let text_position = glam::Vec2::new(650.0, 810.0);
+    let button_text_host = Text::new("New game + (host)");
+    let button_text_join = Text::new("New game + (join)");
+    let text_position_host = glam::Vec2::new(650.0, 810.0);
+    let text_position_join = glam::Vec2::new(650.0, 860.0);
 
-    button.draw(canvas, graphics::DrawParam::default());
-    button_text.draw(
+    button_host.draw(canvas, graphics::DrawParam::default());
+    button_join.draw(canvas, graphics::DrawParam::default());
+    button_text_host.draw(
         canvas,
-        graphics::DrawParam::default().z(100).dest(text_position),
+        graphics::DrawParam::default()
+            .z(100)
+            .dest(text_position_host),
+    );
+    button_text_join.draw(
+        canvas,
+        graphics::DrawParam::default()
+            .z(100)
+            .dest(text_position_join),
     );
 }
 
@@ -144,6 +272,8 @@ impl State {
             current_legal_moves: None,
             selected_square: None,
             past_moves: vec![],
+            is_host: None,
+            selected_color: Some(PieceColor::White),
         };
 
         Ok(s)
@@ -209,7 +339,7 @@ impl event::EventHandler<ggez::GameError> for State {
             }
         }
 
-        // restart button has been pressed
+        // restart button (host) has been pressed
         if x >= 640.0 && x <= 750.0 && y >= 800.0 && y <= 840.0 {
             self.current_legal_moves = Some(vec![]);
             self.past_moves = vec![];
@@ -221,6 +351,14 @@ impl event::EventHandler<ggez::GameError> for State {
                     None => None,
                 });
             self.piece_images = piece_images;
+            listen_for_connections(self);
+            self.is_host = Some(true);
+        }
+
+        // restart button (join) has been pressed
+        if x >= 640.0 && x <= 750.0 && y >= 850.0 && y <= 890.0 {
+            connect_to_host("127.0.0.1:8080".to_string(), self);
+            self.is_host = Some(false);
         }
         Ok(())
     }
