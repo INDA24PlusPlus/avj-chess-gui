@@ -7,7 +7,7 @@ use std::{
     path,
 };
 
-use chess_networking::Start;
+use chess_networking::{Move as NetworkMove, PromotionPiece, Start};
 use conf::WindowMode;
 use dexterws_chess::game::{
     Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square,
@@ -16,6 +16,16 @@ use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
 use graphics::{Color, Drawable, FillOptions, MeshBuilder, Text};
+
+fn piece_to_promotion_piece(piece: Option<Piece>) -> Option<PromotionPiece> {
+    match piece {
+        Some(Piece::Queen) => Some(PromotionPiece::Queen),
+        Some(Piece::Bishop) => Some(PromotionPiece::Bishop),
+        Some(Piece::Knight) => Some(PromotionPiece::Knight),
+        Some(Piece::Rook) => Some(PromotionPiece::Rook),
+        _ => None,
+    }
+}
 
 struct State {
     //    image: graphics::Image,
@@ -29,6 +39,8 @@ struct State {
     // None = not connected, true = host, false = join
     is_host: Option<bool>,
     selected_color: Option<PieceColor>,
+    client_stream: Option<TcpStream>,
+    start: Option<Start>,
 }
 
 fn handle_client(mut stream: TcpStream, state: &mut State) {
@@ -78,56 +90,43 @@ fn listen_for_connections(state: &mut State) {
         SocketAddr::from(([127, 0, 0, 1], 8080)),
         SocketAddr::from(([127, 0, 0, 1], 8081)),
     ];
-    let listener = TcpListener::bind(&addrs[..]).unwrap();
+    let listener: TcpListener = TcpListener::bind(&addrs[..]).unwrap();
+    println!("Listening for connections");
+    listener.set_nonblocking(true).unwrap();
 
-    let (stream, _addr) = listener.accept().unwrap();
-
-    handle_client(stream, state);
+    loop {
+        match listener.accept() {
+            Ok((stream, addr)) => {
+                println!("New connection: {}", addr);
+                stream
+                    .set_nonblocking(true)
+                    .expect("Failed to set client stream to non-blocking");
+                state.client_stream = Some(stream);
+                state.is_host = Some(true);
+                break;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No connection available, continue looping
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => println!("Error accepting connection: {}", e),
+        }
+    }
+    /* println!("Client accepted connection: {}", _addr);
+    handle_client(stream, state); */
 }
 
 fn connect_to_host(address: String, state: &mut State) {
-    let mut stream = TcpStream::connect(address).unwrap();
-    match stream.set_nonblocking(true) {
-        Ok(_) => (),
-        Err(e) => println!("Error setting nonblocking: {}", e),
-    }
-
-    let start = Start {
-        is_white: false,
-        name: None,
-        fen: None,
-        time: None,
-        inc: None,
-    };
-    let start_bytes: Vec<u8> = start.try_into().unwrap();
-    match stream.write(&start_bytes) {
-        Ok(_) => println!("Client start sent"),
-        Err(e) => println!("Error sending client start: {}", e),
-    }
-
-    let mut buf = vec![];
-    loop {
-        match stream.read(&mut buf) {
-            Ok(size) => {
-                println!("Client received host start confirmation: {}", size);
-                break;
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                println!("Connection    would block");
-                continue;
-            }
-            Err(e) => panic!("encountered IO error: {e}"),
-        }
-    }
-
-    println!("Client received buffer size: {}", buf.len());
-
-    match Start::try_from(&buf[..]) {
-        Ok(start) => {
-            println!("Client confirmed start struct: {:?}", start);
+    match TcpStream::connect(address) {
+        Ok(mut stream) => {
+            println!("Connected to server: {}", stream.peer_addr().unwrap());
+            stream
+                .set_nonblocking(true)
+                .expect("Failed to set non-blocking");
+            state.client_stream = Some(stream);
             state.is_host = Some(false);
         }
-        Err(e) => println!("Client parse error: {}", e),
+        Err(e) => println!("Failed to connect: {}", e),
     }
 }
 
@@ -209,7 +208,7 @@ fn draw_board(mb: &mut MeshBuilder) {
     }
 }
 
-fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
+fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context, is_host: Option<bool>) {
     let button_host = graphics::Mesh::new_rounded_rectangle(
         ctx,
         graphics::DrawMode::fill(),
@@ -227,11 +226,21 @@ fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
     )
     .unwrap();
 
+    let button_init_game = graphics::Mesh::new_rounded_rectangle(
+        ctx,
+        graphics::DrawMode::fill(),
+        graphics::Rect::new(640.0, 900.0, 150.0, 40.0),
+        5.0,
+        graphics::Color::new(1.0, 0.0, 0.0, 1.0),
+    )
+    .unwrap();
+
     let button_text_host = Text::new("New game + (host)");
     let button_text_join = Text::new("New game + (join)");
+    let button_text_init_game = Text::new("Init game");
     let text_position_host = glam::Vec2::new(650.0, 810.0);
     let text_position_join = glam::Vec2::new(650.0, 860.0);
-
+    let text_position_init_game = glam::Vec2::new(650.0, 910.0);
     button_host.draw(canvas, graphics::DrawParam::default());
     button_join.draw(canvas, graphics::DrawParam::default());
     button_text_host.draw(
@@ -246,6 +255,42 @@ fn draw_restart_button(canvas: &mut graphics::Canvas, ctx: &mut Context) {
             .z(100)
             .dest(text_position_join),
     );
+    if is_host.is_some() && is_host.unwrap() == false {
+        button_init_game.draw(canvas, graphics::DrawParam::default());
+        button_text_init_game.draw(
+            canvas,
+            graphics::DrawParam::default()
+                .z(100)
+                .dest(text_position_init_game),
+        );
+    }
+}
+
+fn draw_color_picker(canvas: &mut graphics::Canvas, ctx: &mut Context) {
+    let label_text = Text::new("Choose color");
+    let label_position = glam::Vec2::new(500.0, 780.0);
+    let white_rect = graphics::Mesh::new_rounded_rectangle(
+        ctx,
+        graphics::DrawMode::fill(),
+        graphics::Rect::new(500.0, 800.0, 60.0, 40.0),
+        5.0,
+        graphics::Color::new(1.0, 1.0, 1.0, 1.0),
+    )
+    .unwrap();
+
+    let black_rect = graphics::Mesh::new_rounded_rectangle(
+        ctx,
+        graphics::DrawMode::fill(),
+        graphics::Rect::new(500.0, 850.0, 60.0, 40.0),
+        5.0,
+        graphics::Color::new(0.0, 0.0, 0.0, 1.0),
+    )
+    .unwrap();
+
+    label_text.draw(canvas, graphics::DrawParam::default().dest(label_position));
+
+    white_rect.draw(canvas, graphics::DrawParam::default());
+    black_rect.draw(canvas, graphics::DrawParam::default());
 }
 
 impl State {
@@ -273,7 +318,9 @@ impl State {
             selected_square: None,
             past_moves: vec![],
             is_host: None,
-            selected_color: Some(PieceColor::White),
+            selected_color: None,
+            client_stream: None,
+            start: None,
         };
 
         Ok(s)
@@ -322,6 +369,25 @@ impl event::EventHandler<ggez::GameError> for State {
                     .unwrap();
 
                 self.board.make_move(*selected_move).unwrap();
+                let promotion_piece = match selected_move.promotion() {
+                    Some(p) => Some(p),
+                    None => None,
+                };
+                println!("Selected move: {:?}", selected_move);
+                let network_move = NetworkMove {
+                    from: (
+                        selected_move.from().file.to_idx(),
+                        selected_move.from().rank.to_idx(),
+                    ),
+                    to: (
+                        selected_move.to().file.to_idx(),
+                        selected_move.to().rank.to_idx(),
+                    ),
+                    forfeit: false,
+                    offer_draw: false,
+                    promotion: piece_to_promotion_piece(promotion_piece),
+                };
+
                 self.past_moves
                     .insert(0, (self.board.side(), *selected_move));
                 let pieces: [Option<(Piece, PieceColor)>; 64] = self.board.get_all_pieces();
@@ -333,7 +399,9 @@ impl event::EventHandler<ggez::GameError> for State {
                 self.current_legal_moves = None;
             } else {
                 // We are inside the board
+                println!("Selected square: {:?}", square);
                 let legal_moves = self.board.get_moves(square);
+                println!("Legal moves: {:?}", legal_moves);
                 self.current_legal_moves = legal_moves;
                 self.selected_square = Some(square);
             }
@@ -358,7 +426,50 @@ impl event::EventHandler<ggez::GameError> for State {
         // restart button (join) has been pressed
         if x >= 640.0 && x <= 750.0 && y >= 850.0 && y <= 890.0 {
             connect_to_host("127.0.0.1:8080".to_string(), self);
-            self.is_host = Some(false);
+        }
+        if x >= 500.0 && x <= 560.0 && y >= 800.0 && y <= 840.0 {
+            self.selected_color = Some(PieceColor::White);
+        }
+        if x >= 500.0 && x <= 560.0 && y >= 850.0 && y <= 890.0 {
+            self.selected_color = Some(PieceColor::Black);
+        }
+        if x >= 640.0
+            && x <= 750.0
+            && y >= 900.0
+            && y <= 940.0
+            && self.is_host.is_some()
+            && self.is_host.unwrap() == false
+        {
+            println!("Init game button pressed");
+            let start_package = Start {
+                is_white: self.selected_color.unwrap() == PieceColor::White,
+                name: None,
+                fen: None,
+                time: None,
+                inc: None,
+            };
+            let start_package_bytes: Vec<u8> = start_package.try_into().unwrap();
+            println!(
+                "Peer address: {}",
+                self.client_stream.as_ref().unwrap().peer_addr().unwrap()
+            );
+            if let Some(stream) = self.client_stream.as_mut() {
+                match stream.write_all(&start_package_bytes) {
+                    Ok(_) => {
+                        println!(
+                            "Init game package sent: {} bytes",
+                            start_package_bytes.len()
+                        );
+                        match stream.flush() {
+                            Ok(_) => println!("Stream flushed successfully"),
+                            Err(e) => println!("Error flushing stream: {}", e),
+                        }
+                    }
+                    Err(e) => println!("Error sending init game package: {}", e),
+                }
+            } else {
+                println!("No client stream found");
+            }
         }
         Ok(())
     }
@@ -371,7 +482,7 @@ impl event::EventHandler<ggez::GameError> for State {
         } else {
             "White"
         };
-
+        draw_color_picker(&mut canvas, ctx);
         // Draw an image.
         //canvas.draw(&self.image, graphics::DrawParam::new().dest(dst));
 
@@ -428,7 +539,9 @@ impl event::EventHandler<ggez::GameError> for State {
         }
 
         // restart button
-        draw_restart_button(&mut canvas, ctx);
+        if self.selected_color.is_some() {
+            draw_restart_button(&mut canvas, ctx, self.is_host);
+        }
 
         for (index, piece_move) in self.past_moves.iter().enumerate() {
             let text_position = glam::Vec2::new(900.0, 105.0 + ((index as f32) * 40.0));
@@ -472,6 +585,7 @@ impl event::EventHandler<ggez::GameError> for State {
                 );
             }
         }
+
         if self.current_legal_moves.is_some() {
             for legal_move in self.current_legal_moves.as_ref().unwrap() {
                 let new_position = Vec2::new(
@@ -490,8 +604,17 @@ impl event::EventHandler<ggez::GameError> for State {
                 canvas.draw(&circle, graphics::DrawParam::default().z(99));
             }
         }
-        // Draw an image with some options, and different filter modes.
-
+        if self.start.is_some() {
+            let color_to_string = match self.start.as_ref().unwrap().is_white {
+                true => "White",
+                false => "Black",
+            };
+            let text = Text::new(String::from("You are playing as: ") + color_to_string);
+            text.draw(
+                &mut canvas,
+                graphics::DrawParam::default().dest(glam::Vec2::new(500.0, 70.0)),
+            );
+        }
         canvas.set_default_sampler();
 
         // Draw a stroked rectangle mesh.
@@ -501,6 +624,87 @@ impl event::EventHandler<ggez::GameError> for State {
 
         // Finished drawing, show it all on the screen!
         canvas.finish(ctx)?;
+
+        // function to handle the incoming or outgoing network packets
+        if let Some(stream) = &mut self.client_stream {
+            let mut buf = [0u8; 1024];
+            match stream.read(&mut buf) {
+                Ok(size) => {
+                    if size > 0 {
+                        println!("Received data: {}", size);
+                        println!("Is host machine: {}", self.is_host.unwrap());
+                        match NetworkMove::try_from(&buf[..]) {
+                            Ok(piece_move) => {
+                                println!("Received move: {:?}", piece_move);
+                                //self.board.make_move(piece_move).unwrap();
+                            }
+                            Err(e) => println!("Error parsing move: {}", e),
+                        }
+                        match Start::try_from(&buf[..]) {
+                            Ok(start) => {
+                                println!("Received start: {:?}", start);
+                                if self.is_host.is_some_and(|f| f == true) {
+                                    // selected color will always remain the same for the host
+                                    // however if client has chosen same as host, then client color will be opposite
+                                    let client_is_white = if start.is_white
+                                        && self
+                                            .selected_color
+                                            .is_some_and(|f| f == PieceColor::White)
+                                    {
+                                        false
+                                    } else if !start.is_white
+                                        && self
+                                            .selected_color
+                                            .is_some_and(|f| f == PieceColor::Black)
+                                    {
+                                        true
+                                    } else {
+                                        start.is_white
+                                    };
+                                    let return_start_package = Start {
+                                        is_white: client_is_white,
+                                        name: start.name,
+                                        fen: start.fen,
+                                        time: start.time,
+                                        inc: start.inc,
+                                    };
+                                    let return_start_package_bytes: Vec<u8> =
+                                        return_start_package.try_into().unwrap();
+
+                                    self.start = Some(Start {
+                                        is_white: self.selected_color.unwrap() == PieceColor::White,
+                                        name: None,
+                                        fen: None,
+                                        time: None,
+                                        inc: None,
+                                    });
+                                    self.client_stream
+                                        .as_ref()
+                                        .unwrap()
+                                        .write(&return_start_package_bytes)
+                                        .unwrap();
+                                } else {
+                                    // client receives start package from host (after sending it once)
+                                    self.selected_color = Some(if start.is_white {
+                                        PieceColor::Black
+                                    } else {
+                                        PieceColor::White
+                                    });
+                                    self.start = Some(start);
+                                }
+                            }
+                            Err(e) => println!("Error parsing start: {}", e),
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No data available right now, just continue
+                }
+                Err(e) => println!("Error reading from stream: {}", e),
+            }
+        }
+
+        // Draw an image with some options, and different filter modes.
 
         Ok(())
     }
