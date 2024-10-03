@@ -10,8 +10,9 @@ use std::{
 use chess_networking::{Move as NetworkMove, PromotionPiece, Start};
 use conf::WindowMode;
 use dexterws_chess::game::{
-    Board, Color as PieceColor, GameResult as ChessResult, Move, Piece, Square,
+    Board, Color as PieceColor, File, GameResult as ChessResult, Move, Piece, Rank, Square,
 };
+use dexterws_chess::mv;
 use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
@@ -23,6 +24,16 @@ fn piece_to_promotion_piece(piece: Option<Piece>) -> Option<PromotionPiece> {
         Some(Piece::Bishop) => Some(PromotionPiece::Bishop),
         Some(Piece::Knight) => Some(PromotionPiece::Knight),
         Some(Piece::Rook) => Some(PromotionPiece::Rook),
+        _ => None,
+    }
+}
+
+fn promotion_piece_to_piece(piece: Option<PromotionPiece>) -> Option<Piece> {
+    match piece {
+        Some(PromotionPiece::Queen) => Some(Piece::Queen),
+        Some(PromotionPiece::Bishop) => Some(Piece::Bishop),
+        Some(PromotionPiece::Knight) => Some(Piece::Knight),
+        Some(PromotionPiece::Rook) => Some(Piece::Rook),
         _ => None,
     }
 }
@@ -387,6 +398,14 @@ impl event::EventHandler<ggez::GameError> for State {
                     offer_draw: false,
                     promotion: piece_to_promotion_piece(promotion_piece),
                 };
+                let network_move_bytes: Vec<u8> = network_move.try_into().unwrap();
+                match self.client_stream.as_mut() {
+                    Some(stream) => match stream.write_all(&network_move_bytes) {
+                        Ok(_) => println!("Move sent successfully"),
+                        Err(e) => println!("Error sending move: {}", e),
+                    },
+                    None => println!("No client stream found"),
+                }
 
                 self.past_moves
                     .insert(0, (self.board.side(), *selected_move));
@@ -636,7 +655,40 @@ impl event::EventHandler<ggez::GameError> for State {
                         match NetworkMove::try_from(&buf[..]) {
                             Ok(piece_move) => {
                                 println!("Received move: {:?}", piece_move);
-                                //self.board.make_move(piece_move).unwrap();
+                                let from = Square {
+                                    file: File::from_idx(piece_move.from.0),
+                                    rank: Rank::from_idx(piece_move.from.1),
+                                };
+                                let to = Square {
+                                    file: File::from_idx(piece_move.to.0),
+                                    rank: Rank::from_idx(piece_move.to.1),
+                                };
+                                let chess_move = Move::new(
+                                    from,
+                                    to,
+                                    promotion_piece_to_piece(piece_move.promotion),
+                                );
+                                match self.board.make_move(chess_move) {
+                                    Ok(_) => {
+                                        let pieces: [Option<(Piece, PieceColor)>; 64] =
+                                            self.board.get_all_pieces();
+                                        let piece_images: [Option<graphics::Image>; 64] = pieces
+                                            .map(|piece| match piece {
+                                                Some(p) => Some(
+                                                    graphics::Image::from_path(
+                                                        ctx,
+                                                        piece_to_image(p),
+                                                    )
+                                                    .unwrap(),
+                                                ),
+                                                None => None,
+                                            });
+                                        self.piece_images = piece_images;
+
+                                        self.past_moves.insert(0, (self.board.side(), chess_move));
+                                    }
+                                    Err(e) => println!("Error making move: {}", e),
+                                }
                             }
                             Err(e) => println!("Error parsing move: {}", e),
                         }
