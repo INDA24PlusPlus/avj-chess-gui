@@ -362,6 +362,7 @@ impl event::EventHandler<ggez::GameError> for State {
             let index = (rank * 8) + file;
 
             let square = Square::from_idx(index);
+            let piece = self.board.get_piece(square);
 
             if self.current_legal_moves.is_some()
                 && self
@@ -424,7 +425,11 @@ impl event::EventHandler<ggez::GameError> for State {
                     self.piece_images = piece_images;
                 } */
                 self.current_legal_moves = None;
-            } else {
+            } else if (piece.is_some_and(|p| p.0 == PieceColor::White)
+                && self.start.as_ref().unwrap().is_white == true)
+                || (piece.is_some_and(|p| p.0 == PieceColor::Black)
+                    && self.start.as_ref().unwrap().is_white == false)
+            {
                 // We are inside the board
                 println!("Selected square: {:?}", square);
                 let legal_moves = self.board.get_moves(square);
