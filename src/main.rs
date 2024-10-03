@@ -52,6 +52,7 @@ struct State {
     client_stream: Option<TcpStream>,
     start: Option<Start>,
     pending_chess_move: Option<Move>,
+    game_has_ended: bool,
 }
 
 fn handle_client(mut stream: TcpStream, state: &mut State) {
@@ -333,6 +334,7 @@ impl State {
             client_stream: None,
             start: None,
             pending_chess_move: None,
+            game_has_ended: false,
         };
 
         Ok(s)
@@ -426,8 +428,8 @@ impl event::EventHandler<ggez::GameError> for State {
                 } */
                 self.current_legal_moves = None;
             } else if (piece.is_some_and(|p| p.0 == PieceColor::White)
-                && self.start.as_ref().unwrap().is_white == true)
-                || (piece.is_some_and(|p| p.0 == PieceColor::Black)
+                && self.start.as_ref().unwrap().is_white == true
+                || piece.is_some_and(|p| p.0 == PieceColor::Black)
                     && self.start.as_ref().unwrap().is_white == false)
             {
                 // We are inside the board
@@ -518,7 +520,13 @@ impl event::EventHandler<ggez::GameError> for State {
         // Draw an image.
         //canvas.draw(&self.image, graphics::DrawParam::new().dest(dst));
 
-        let status_text = match self.board.get_game_result() {
+        if self.game_has_ended && self.board.get_game_result() == ChessResult::InProgress {
+            Text::new("Game has ended. Press restart to start new game.").draw(
+                &mut canvas,
+                graphics::DrawParam::new().dest(glam::Vec2::new(350.0, 40.0)),
+            );
+        } else {
+            let status_text: Text = match self.board.get_game_result() {
             ChessResult::Checkmate {
                 winner: PieceColor::White,
             } => Text::new("Black in checkmate, white has won. Press restart to start new game."),
@@ -540,6 +548,11 @@ impl event::EventHandler<ggez::GameError> for State {
             ChessResult::InProgress => Text::new("Game in progress"),
         };
 
+            status_text.draw(
+                &mut canvas,
+                graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 40.0)),
+            );
+        }
         // display rank and file
         for i in 0..8 {
             // display rank
@@ -556,11 +569,6 @@ impl event::EventHandler<ggez::GameError> for State {
                     .dest(glam::Vec2::new(130.0 + ((i as f32) * 80.0), 750.0)),
             );
         }
-
-        status_text.draw(
-            &mut canvas,
-            graphics::DrawParam::new().dest(glam::Vec2::new(400.0, 40.0)),
-        );
 
         if self.board.get_game_result() == ChessResult::InProgress {
             let side_text = Text::new(String::from(color) + " to move");
@@ -663,11 +671,8 @@ impl event::EventHandler<ggez::GameError> for State {
             match stream.read(&mut buf) {
                 Ok(size) => {
                     if size > 0 {
-                        println!("Received data: {}", size);
-                        println!("Is host machine: {}", self.is_host.unwrap());
                         match NetworkMove::try_from(&buf[..]) {
                             Ok(piece_move) => {
-                                println!("Received move: {:?}", piece_move);
                                 let from = Square {
                                     file: File::from_idx(piece_move.from.0),
                                     rank: Rank::from_idx(piece_move.from.1),
@@ -720,6 +725,31 @@ impl event::EventHandler<ggez::GameError> for State {
                                     let legal_moves = self.board.get_moves(chess_move.from());
                                     let is_legal =
                                         legal_moves.as_ref().unwrap().contains(&chess_move);
+
+                                    if is_legal {
+                                        match self.board.make_move(chess_move) {
+                                            Ok(_) => {
+                                                let pieces: [Option<(Piece, PieceColor)>; 64] =
+                                                    self.board.get_all_pieces();
+                                                let piece_images: [Option<graphics::Image>; 64] =
+                                                    pieces.map(|piece| match piece {
+                                                        Some(p) => Some(
+                                                            graphics::Image::from_path(
+                                                                ctx,
+                                                                piece_to_image(p),
+                                                            )
+                                                            .unwrap(),
+                                                        ),
+                                                        None => None,
+                                                    });
+                                                self.piece_images = piece_images;
+
+                                                self.past_moves
+                                                    .insert(0, (self.board.side(), chess_move));
+                                            }
+                                            Err(e) => println!("Error making move: {}", e),
+                                        }
+                                    }
                                     let end_state = if self.board.get_game_result()
                                         == ChessResult::InProgress
                                     {
@@ -739,10 +769,12 @@ impl event::EventHandler<ggez::GameError> for State {
                                     } else {
                                         None
                                     };
+
                                     let return_move_package = Ack {
                                         ok: is_legal,
                                         end_state,
                                     };
+                                    println!("Sending ack as host: {:?}", return_move_package);
                                     let return_move_package_bytes: Vec<u8> =
                                         return_move_package.try_into().unwrap();
                                     self.client_stream
@@ -750,29 +782,6 @@ impl event::EventHandler<ggez::GameError> for State {
                                         .unwrap()
                                         .write(&return_move_package_bytes)
                                         .unwrap();
-
-                                    match self.board.make_move(chess_move) {
-                                        Ok(_) => {
-                                            let pieces: [Option<(Piece, PieceColor)>; 64] =
-                                                self.board.get_all_pieces();
-                                            let piece_images: [Option<graphics::Image>; 64] =
-                                                pieces.map(|piece| match piece {
-                                                    Some(p) => Some(
-                                                        graphics::Image::from_path(
-                                                            ctx,
-                                                            piece_to_image(p),
-                                                        )
-                                                        .unwrap(),
-                                                    ),
-                                                    None => None,
-                                                });
-                                            self.piece_images = piece_images;
-
-                                            self.past_moves
-                                                .insert(0, (self.board.side(), chess_move));
-                                        }
-                                        Err(e) => println!("Error making move: {}", e),
-                                    }
                                 }
                             }
                             Err(e) => println!("Error parsing move: {}", e),
@@ -781,6 +790,12 @@ impl event::EventHandler<ggez::GameError> for State {
                             Ok(ack) => {
                                 println!("Received ack: {:?}", ack);
                                 if self.is_host.is_some_and(|f| f == false) {
+                                    if ack.end_state.is_some() {
+                                        self.game_has_ended = true;
+                                        // Close the connection
+
+                                        self.client_stream = None;
+                                    }
                                     if ack.ok {
                                         match self.board.make_move(self.pending_chess_move.unwrap())
                                         {
