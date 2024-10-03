@@ -7,12 +7,11 @@ use std::{
     path,
 };
 
-use chess_networking::{Move as NetworkMove, PromotionPiece, Start};
+use chess_networking::{Ack, GameState, Move as NetworkMove, PromotionPiece, Start};
 use conf::WindowMode;
 use dexterws_chess::game::{
     Board, Color as PieceColor, File, GameResult as ChessResult, Move, Piece, Rank, Square,
 };
-use dexterws_chess::mv;
 use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
@@ -52,6 +51,7 @@ struct State {
     selected_color: Option<PieceColor>,
     client_stream: Option<TcpStream>,
     start: Option<Start>,
+    pending_chess_move: Option<Move>,
 }
 
 fn handle_client(mut stream: TcpStream, state: &mut State) {
@@ -332,6 +332,7 @@ impl State {
             selected_color: None,
             client_stream: None,
             start: None,
+            pending_chess_move: None,
         };
 
         Ok(s)
@@ -379,7 +380,10 @@ impl event::EventHandler<ggez::GameError> for State {
                     .find(|m| m.to().file.to_idx() == file && m.to().rank.to_idx() == rank)
                     .unwrap();
 
-                self.board.make_move(*selected_move).unwrap();
+                /* if false {
+                    self.board.make_move(*selected_move).unwrap();
+                } */
+                self.pending_chess_move = Some(*selected_move);
                 let promotion_piece = match selected_move.promotion() {
                     Some(p) => Some(p),
                     None => None,
@@ -406,15 +410,19 @@ impl event::EventHandler<ggez::GameError> for State {
                     },
                     None => println!("No client stream found"),
                 }
-
-                self.past_moves
-                    .insert(0, (self.board.side(), *selected_move));
-                let pieces: [Option<(Piece, PieceColor)>; 64] = self.board.get_all_pieces();
-                let piece_images: [Option<graphics::Image>; 64] = pieces.map(|piece| match piece {
-                    Some(p) => Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap()),
-                    None => None,
-                });
-                self.piece_images = piece_images;
+                /* if false {
+                    self.past_moves
+                        .insert(0, (self.board.side(), *selected_move));
+                    let pieces: [Option<(Piece, PieceColor)>; 64] = self.board.get_all_pieces();
+                    let piece_images: [Option<graphics::Image>; 64] =
+                        pieces.map(|piece| match piece {
+                            Some(p) => {
+                                Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap())
+                            }
+                            None => None,
+                        });
+                    self.piece_images = piece_images;
+                } */
                 self.current_legal_moves = None;
             } else {
                 // We are inside the board
@@ -668,29 +676,167 @@ impl event::EventHandler<ggez::GameError> for State {
                                     to,
                                     promotion_piece_to_piece(piece_move.promotion),
                                 );
-                                match self.board.make_move(chess_move) {
-                                    Ok(_) => {
-                                        let pieces: [Option<(Piece, PieceColor)>; 64] =
-                                            self.board.get_all_pieces();
-                                        let piece_images: [Option<graphics::Image>; 64] = pieces
-                                            .map(|piece| match piece {
-                                                Some(p) => Some(
-                                                    graphics::Image::from_path(
-                                                        ctx,
-                                                        piece_to_image(p),
-                                                    )
-                                                    .unwrap(),
-                                                ),
-                                                None => None,
-                                            });
-                                        self.piece_images = piece_images;
-
-                                        self.past_moves.insert(0, (self.board.side(), chess_move));
+                                if self.is_host.is_some_and(|f| f == false) {
+                                    // client will always ack the move
+                                    let return_move_package = Ack {
+                                        ok: true,
+                                        end_state: None,
+                                    };
+                                    let return_move_package_bytes: Vec<u8> =
+                                        return_move_package.try_into().unwrap();
+                                    self.client_stream
+                                        .as_ref()
+                                        .unwrap()
+                                        .write(&return_move_package_bytes)
+                                        .unwrap();
+                                    match self.board.make_move(chess_move) {
+                                        Ok(_) => {
+                                            self.past_moves
+                                                .insert(0, (self.board.side(), chess_move));
+                                            let pieces: [Option<(Piece, PieceColor)>; 64] =
+                                                self.board.get_all_pieces();
+                                            let piece_images: [Option<graphics::Image>; 64] =
+                                                pieces.map(|piece| match piece {
+                                                    Some(p) => Some(
+                                                        graphics::Image::from_path(
+                                                            ctx,
+                                                            piece_to_image(p),
+                                                        )
+                                                        .unwrap(),
+                                                    ),
+                                                    None => None,
+                                                });
+                                            self.piece_images = piece_images;
+                                        }
+                                        Err(e) => println!("Error making move: {}", e),
                                     }
-                                    Err(e) => println!("Error making move: {}", e),
+                                }
+                                if self.is_host.is_some_and(|f| f == true) {
+                                    let legal_moves = self.board.get_moves(chess_move.from());
+                                    let is_legal =
+                                        legal_moves.as_ref().unwrap().contains(&chess_move);
+                                    let end_state = if self.board.get_game_result()
+                                        == ChessResult::InProgress
+                                    {
+                                        None
+                                    } else if self.board.get_game_result()
+                                        == (ChessResult::Checkmate {
+                                            winner: PieceColor::White,
+                                        })
+                                        || self.board.get_game_result()
+                                            == (ChessResult::Checkmate {
+                                                winner: PieceColor::Black,
+                                            })
+                                    {
+                                        Some(GameState::CheckMate)
+                                    } else if self.board.get_game_result() == ChessResult::Draw {
+                                        Some(GameState::Draw)
+                                    } else {
+                                        None
+                                    };
+                                    let return_move_package = Ack {
+                                        ok: is_legal,
+                                        end_state,
+                                    };
+                                    let return_move_package_bytes: Vec<u8> =
+                                        return_move_package.try_into().unwrap();
+                                    self.client_stream
+                                        .as_ref()
+                                        .unwrap()
+                                        .write(&return_move_package_bytes)
+                                        .unwrap();
+
+                                    match self.board.make_move(chess_move) {
+                                        Ok(_) => {
+                                            let pieces: [Option<(Piece, PieceColor)>; 64] =
+                                                self.board.get_all_pieces();
+                                            let piece_images: [Option<graphics::Image>; 64] =
+                                                pieces.map(|piece| match piece {
+                                                    Some(p) => Some(
+                                                        graphics::Image::from_path(
+                                                            ctx,
+                                                            piece_to_image(p),
+                                                        )
+                                                        .unwrap(),
+                                                    ),
+                                                    None => None,
+                                                });
+                                            self.piece_images = piece_images;
+
+                                            self.past_moves
+                                                .insert(0, (self.board.side(), chess_move));
+                                        }
+                                        Err(e) => println!("Error making move: {}", e),
+                                    }
                                 }
                             }
                             Err(e) => println!("Error parsing move: {}", e),
+                        }
+                        match Ack::try_from(&buf[..]) {
+                            Ok(ack) => {
+                                println!("Received ack: {:?}", ack);
+                                if self.is_host.is_some_and(|f| f == false) {
+                                    if ack.ok {
+                                        match self.board.make_move(self.pending_chess_move.unwrap())
+                                        {
+                                            Ok(_) => {
+                                                self.past_moves.insert(
+                                                    0,
+                                                    (
+                                                        self.board.side(),
+                                                        self.pending_chess_move.unwrap(),
+                                                    ),
+                                                );
+                                                self.pending_chess_move = None;
+                                                let pieces: [Option<(Piece, PieceColor)>; 64] =
+                                                    self.board.get_all_pieces();
+                                                let piece_images: [Option<graphics::Image>; 64] =
+                                                    pieces.map(|piece| match piece {
+                                                        Some(p) => Some(
+                                                            graphics::Image::from_path(
+                                                                ctx,
+                                                                piece_to_image(p),
+                                                            )
+                                                            .unwrap(),
+                                                        ),
+                                                        None => None,
+                                                    });
+                                                self.piece_images = piece_images;
+                                            }
+                                            Err(e) => println!("Error making move: {}", e),
+                                        }
+                                    }
+                                } else if self.is_host.is_some_and(|f| f == true) {
+                                    match self.board.make_move(self.pending_chess_move.unwrap()) {
+                                        Ok(_) => {
+                                            self.past_moves.insert(
+                                                0,
+                                                (
+                                                    self.board.side(),
+                                                    self.pending_chess_move.unwrap(),
+                                                ),
+                                            );
+                                            self.pending_chess_move = None;
+                                            let pieces: [Option<(Piece, PieceColor)>; 64] =
+                                                self.board.get_all_pieces();
+                                            let piece_images: [Option<graphics::Image>; 64] =
+                                                pieces.map(|piece| match piece {
+                                                    Some(p) => Some(
+                                                        graphics::Image::from_path(
+                                                            ctx,
+                                                            piece_to_image(p),
+                                                        )
+                                                        .unwrap(),
+                                                    ),
+                                                    None => None,
+                                                });
+                                            self.piece_images = piece_images;
+                                        }
+                                        Err(e) => println!("Error making move: {}", e),
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Error parsing ack: {}", e),
                         }
                         match Start::try_from(&buf[..]) {
                             Ok(start) => {
