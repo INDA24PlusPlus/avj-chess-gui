@@ -1,3 +1,4 @@
+use network_helpers::{connect_to_host, handle_incoming_packages, listen_for_connections};
 use std::io::{ErrorKind, Write};
 use std::{
     collections::HashMap,
@@ -16,7 +17,7 @@ use event::MouseButton;
 use ggez::*;
 use glam::Vec2;
 use graphics::{Color, Drawable, FillOptions, MeshBuilder, Text};
-
+pub mod network_helpers;
 fn piece_to_promotion_piece(piece: Option<Piece>) -> Option<PromotionPiece> {
     match piece {
         Some(Piece::Queen) => Some(PromotionPiece::Queen),
@@ -55,51 +56,6 @@ struct State {
     game_has_ended: bool,
     offer_draw_received: bool,
     offer_draw_sent: bool,
-}
-
-fn listen_for_connections(state: &mut State) {
-    let addrs = [
-        SocketAddr::from(([127, 0, 0, 1], 8080)),
-        SocketAddr::from(([127, 0, 0, 1], 8081)),
-    ];
-    let listener: TcpListener = TcpListener::bind(&addrs[..]).unwrap();
-    println!("Listening for connections");
-    listener.set_nonblocking(true).unwrap();
-
-    loop {
-        match listener.accept() {
-            Ok((stream, addr)) => {
-                println!("New connection: {}", addr);
-                stream
-                    .set_nonblocking(true)
-                    .expect("Failed to set client stream to non-blocking");
-                state.client_stream = Some(stream);
-                state.is_host = Some(true);
-                break;
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No connection available, continue looping
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => println!("Error accepting connection: {}", e),
-        }
-    }
-    /* println!("Client accepted connection: {}", _addr);
-    handle_client(stream, state); */
-}
-
-fn connect_to_host(address: String, state: &mut State) {
-    match TcpStream::connect(address) {
-        Ok(mut stream) => {
-            println!("Connected to server: {}", stream.peer_addr().unwrap());
-            stream
-                .set_nonblocking(true)
-                .expect("Failed to set non-blocking");
-            state.client_stream = Some(stream);
-            state.is_host = Some(false);
-        }
-        Err(e) => println!("Failed to connect: {}", e),
-    }
 }
 
 fn piece_to_image(piece: (Piece, PieceColor)) -> String {
@@ -714,7 +670,7 @@ impl event::EventHandler<ggez::GameError> for State {
                     ctx,
                     graphics::DrawMode::Fill(FillOptions::default()),
                     new_position,
-                    10.0,
+                    20.0,
                     1.0,
                     Color::new(0.658, 0.654, 0.639, 1.0),
                 )?;
@@ -743,282 +699,9 @@ impl event::EventHandler<ggez::GameError> for State {
         canvas.finish(ctx)?;
 
         // function to handle the incoming or outgoing network packets
-        if let Some(stream) = &mut self.client_stream {
-            let mut buf = [0u8; 1024];
-            match stream.read(&mut buf) {
-                Ok(size) => {
-                    if size > 0 {
-                        match NetworkMove::try_from(&buf[..]) {
-                            Ok(piece_move) => {
-                                if piece_move.forfeit {
-                                    self.game_has_ended = true;
-                                    self.client_stream = None;
-                                    return Ok(());
-                                }
-                                if piece_move.offer_draw {
-                                    self.offer_draw_received = true;
-                                    return Ok(());
-                                }
-
-                                let from = Square {
-                                    file: File::from_idx(piece_move.from.0),
-                                    rank: Rank::from_idx(piece_move.from.1),
-                                };
-                                let to = Square {
-                                    file: File::from_idx(piece_move.to.0),
-                                    rank: Rank::from_idx(piece_move.to.1),
-                                };
-                                let chess_move = Move::new(
-                                    from,
-                                    to,
-                                    promotion_piece_to_piece(piece_move.promotion),
-                                );
-                                if self.is_host.is_some_and(|f| f == false) {
-                                    // client will always ack the move
-                                    let return_move_package = Ack {
-                                        ok: true,
-                                        end_state: None,
-                                    };
-                                    let return_move_package_bytes: Vec<u8> =
-                                        return_move_package.try_into().unwrap();
-                                    self.client_stream
-                                        .as_ref()
-                                        .unwrap()
-                                        .write(&return_move_package_bytes)
-                                        .unwrap();
-                                    match self.board.make_move(chess_move) {
-                                        Ok(_) => {
-                                            self.past_moves
-                                                .insert(0, (self.board.side(), chess_move));
-                                            let pieces: [Option<(Piece, PieceColor)>; 64] =
-                                                self.board.get_all_pieces();
-                                            let piece_images: [Option<graphics::Image>; 64] =
-                                                pieces.map(|piece| match piece {
-                                                    Some(p) => Some(
-                                                        graphics::Image::from_path(
-                                                            ctx,
-                                                            piece_to_image(p),
-                                                        )
-                                                        .unwrap(),
-                                                    ),
-                                                    None => None,
-                                                });
-                                            self.piece_images = piece_images;
-                                        }
-                                        Err(e) => println!("Error making move: {}", e),
-                                    }
-                                }
-                                if self.is_host.is_some_and(|f| f == true) {
-                                    let legal_moves = self.board.get_moves(chess_move.from());
-                                    let is_legal =
-                                        legal_moves.as_ref().unwrap().contains(&chess_move);
-
-                                    if is_legal {
-                                        match self.board.make_move(chess_move) {
-                                            Ok(_) => {
-                                                let pieces: [Option<(Piece, PieceColor)>; 64] =
-                                                    self.board.get_all_pieces();
-                                                let piece_images: [Option<graphics::Image>; 64] =
-                                                    pieces.map(|piece| match piece {
-                                                        Some(p) => Some(
-                                                            graphics::Image::from_path(
-                                                                ctx,
-                                                                piece_to_image(p),
-                                                            )
-                                                            .unwrap(),
-                                                        ),
-                                                        None => None,
-                                                    });
-                                                self.piece_images = piece_images;
-
-                                                self.past_moves
-                                                    .insert(0, (self.board.side(), chess_move));
-                                            }
-                                            Err(e) => println!("Error making move: {}", e),
-                                        }
-                                    }
-                                    let end_state = if self.board.get_game_result()
-                                        == ChessResult::InProgress
-                                    {
-                                        None
-                                    } else if self.board.get_game_result()
-                                        == (ChessResult::Checkmate {
-                                            winner: PieceColor::White,
-                                        })
-                                        || self.board.get_game_result()
-                                            == (ChessResult::Checkmate {
-                                                winner: PieceColor::Black,
-                                            })
-                                    {
-                                        Some(GameState::CheckMate)
-                                    } else if self.board.get_game_result() == ChessResult::Draw {
-                                        Some(GameState::Draw)
-                                    } else {
-                                        None
-                                    };
-
-                                    let return_move_package = Ack {
-                                        ok: is_legal,
-                                        end_state,
-                                    };
-                                    let return_move_package_bytes: Vec<u8> =
-                                        return_move_package.try_into().unwrap();
-                                    self.client_stream
-                                        .as_ref()
-                                        .unwrap()
-                                        .write(&return_move_package_bytes)
-                                        .unwrap();
-                                }
-                            }
-                            Err(e) => println!("Error parsing move: {}", e),
-                        }
-                        match Ack::try_from(&buf[..]) {
-                            Ok(ack) => {
-                                if self.offer_draw_sent {
-                                    if ack.ok {
-                                        self.game_has_ended = true;
-                                        self.client_stream = None;
-                                        self.offer_draw_sent = false;
-                                    } else {
-                                        self.offer_draw_sent = false;
-                                    }
-                                    return Ok(());
-                                }
-                                if self.is_host.is_some_and(|f| f == false) {
-                                    if ack.end_state.is_some() {
-                                        self.game_has_ended = true;
-                                        // Close the connection
-
-                                        self.client_stream = None;
-                                    }
-                                    if ack.ok {
-                                        match self.board.make_move(self.pending_chess_move.unwrap())
-                                        {
-                                            Ok(_) => {
-                                                self.past_moves.insert(
-                                                    0,
-                                                    (
-                                                        self.board.side(),
-                                                        self.pending_chess_move.unwrap(),
-                                                    ),
-                                                );
-                                                self.pending_chess_move = None;
-                                                let pieces: [Option<(Piece, PieceColor)>; 64] =
-                                                    self.board.get_all_pieces();
-                                                let piece_images: [Option<graphics::Image>; 64] =
-                                                    pieces.map(|piece| match piece {
-                                                        Some(p) => Some(
-                                                            graphics::Image::from_path(
-                                                                ctx,
-                                                                piece_to_image(p),
-                                                            )
-                                                            .unwrap(),
-                                                        ),
-                                                        None => None,
-                                                    });
-                                                self.piece_images = piece_images;
-                                            }
-                                            Err(e) => println!("Error making move: {}", e),
-                                        }
-                                    }
-                                } else if self.is_host.is_some_and(|f| f == true) {
-                                    match self.board.make_move(self.pending_chess_move.unwrap()) {
-                                        Ok(_) => {
-                                            self.past_moves.insert(
-                                                0,
-                                                (
-                                                    self.board.side(),
-                                                    self.pending_chess_move.unwrap(),
-                                                ),
-                                            );
-                                            self.pending_chess_move = None;
-                                            let pieces: [Option<(Piece, PieceColor)>; 64] =
-                                                self.board.get_all_pieces();
-                                            let piece_images: [Option<graphics::Image>; 64] =
-                                                pieces.map(|piece| match piece {
-                                                    Some(p) => Some(
-                                                        graphics::Image::from_path(
-                                                            ctx,
-                                                            piece_to_image(p),
-                                                        )
-                                                        .unwrap(),
-                                                    ),
-                                                    None => None,
-                                                });
-                                            self.piece_images = piece_images;
-                                        }
-                                        Err(e) => println!("Error making move: {}", e),
-                                    }
-                                }
-                            }
-                            Err(e) => println!("Error parsing ack: {}", e),
-                        }
-                        match Start::try_from(&buf[..]) {
-                            Ok(start) => {
-                                println!("Received start: {:?}", start);
-                                if self.is_host.is_some_and(|f| f == true) {
-                                    // selected color will always remain the same for the host
-                                    // however if client has chosen same as host, then client color will be opposite
-                                    let client_is_white = if start.is_white
-                                        && self
-                                            .selected_color
-                                            .is_some_and(|f| f == PieceColor::White)
-                                    {
-                                        false
-                                    } else if !start.is_white
-                                        && self
-                                            .selected_color
-                                            .is_some_and(|f| f == PieceColor::Black)
-                                    {
-                                        true
-                                    } else {
-                                        start.is_white
-                                    };
-                                    let return_start_package = Start {
-                                        is_white: client_is_white,
-                                        name: start.name,
-                                        fen: start.fen,
-                                        time: start.time,
-                                        inc: start.inc,
-                                    };
-                                    let return_start_package_bytes: Vec<u8> =
-                                        return_start_package.try_into().unwrap();
-
-                                    self.start = Some(Start {
-                                        is_white: self.selected_color.unwrap() == PieceColor::White,
-                                        name: None,
-                                        fen: None,
-                                        time: None,
-                                        inc: None,
-                                    });
-                                    self.client_stream
-                                        .as_ref()
-                                        .unwrap()
-                                        .write(&return_start_package_bytes)
-                                        .unwrap();
-                                } else {
-                                    // client receives start package from host (after sending it once)
-                                    self.selected_color = Some(if start.is_white {
-                                        PieceColor::Black
-                                    } else {
-                                        PieceColor::White
-                                    });
-                                    self.start = Some(start);
-                                }
-                            }
-                            Err(e) => println!("Error parsing start: {}", e),
-                        }
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available right now, just continue
-                }
-                Err(e) => println!("Error reading from stream: {}", e),
-            }
-        }
 
         // Draw an image with some options, and different filter modes.
-
+        handle_incoming_packages(ctx, self);
         Ok(())
     }
 }
