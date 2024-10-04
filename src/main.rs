@@ -53,48 +53,8 @@ struct State {
     start: Option<Start>,
     pending_chess_move: Option<Move>,
     game_has_ended: bool,
-}
-
-fn handle_client(mut stream: TcpStream, state: &mut State) {
-    let mut buf = vec![];
-    match stream.set_nonblocking(true) {
-        Ok(_) => (),
-        Err(e) => println!("Error setting nonblocking: {}", e),
-    }
-    loop {
-        println!("Looping");
-        match stream.read_to_end(&mut buf) {
-            Ok(_) => {
-                println!("Client start received");
-                break;
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                println!("WouldBlock");
-                continue;
-            }
-            Err(e) => panic!("encountered IO error: {e}"),
-        };
-    }
-
-    match Start::try_from(&buf[..]) {
-        Ok(start) => {
-            println!("Host start: {:?}", start);
-            let client_start = Start {
-                is_white: state.selected_color.unwrap() == PieceColor::White,
-                name: None,
-                fen: None,
-                time: None,
-                inc: None,
-            };
-            let client_start_bytes: Vec<u8> = client_start.try_into().unwrap();
-            println!("Host sending client start: {}", client_start_bytes.len());
-            match stream.write(&client_start_bytes) {
-                Ok(_) => println!("Client confirmed start sent"),
-                Err(e) => println!("Error sending client start: {}", e),
-            }
-        }
-        Err(e) => println!("Error host parsing start: {}", e),
-    }
+    offer_draw_received: bool,
+    offer_draw_sent: bool,
 }
 
 fn listen_for_connections(state: &mut State) {
@@ -307,7 +267,6 @@ fn draw_color_picker(canvas: &mut graphics::Canvas, ctx: &mut Context) {
 
 impl State {
     fn new(ctx: &mut Context) -> GameResult<State> {
-        //let image = graphics::Image::from_path(ctx, "/white_square.png")?;
         let board = Board::new();
 
         let mb = &mut graphics::MeshBuilder::new();
@@ -335,6 +294,8 @@ impl State {
             start: None,
             pending_chess_move: None,
             game_has_ended: false,
+            offer_draw_received: false,
+            offer_draw_sent: false,
         };
 
         Ok(s)
@@ -383,9 +344,6 @@ impl event::EventHandler<ggez::GameError> for State {
                     .find(|m| m.to().file.to_idx() == file && m.to().rank.to_idx() == rank)
                     .unwrap();
 
-                /* if false {
-                    self.board.make_move(*selected_move).unwrap();
-                } */
                 self.pending_chess_move = Some(*selected_move);
                 let promotion_piece = match selected_move.promotion() {
                     Some(p) => Some(p),
@@ -413,24 +371,12 @@ impl event::EventHandler<ggez::GameError> for State {
                     },
                     None => println!("No client stream found"),
                 }
-                /* if false {
-                    self.past_moves
-                        .insert(0, (self.board.side(), *selected_move));
-                    let pieces: [Option<(Piece, PieceColor)>; 64] = self.board.get_all_pieces();
-                    let piece_images: [Option<graphics::Image>; 64] =
-                        pieces.map(|piece| match piece {
-                            Some(p) => {
-                                Some(graphics::Image::from_path(ctx, piece_to_image(p)).unwrap())
-                            }
-                            None => None,
-                        });
-                    self.piece_images = piece_images;
-                } */
+
                 self.current_legal_moves = None;
-            } else if (piece.is_some_and(|p| p.0 == PieceColor::White)
+            } else if piece.is_some_and(|p| p.0 == PieceColor::White)
                 && self.start.as_ref().unwrap().is_white == true
                 || piece.is_some_and(|p| p.0 == PieceColor::Black)
-                    && self.start.as_ref().unwrap().is_white == false)
+                    && self.start.as_ref().unwrap().is_white == false
             {
                 // We are inside the board
                 println!("Selected square: {:?}", square);
@@ -467,6 +413,82 @@ impl event::EventHandler<ggez::GameError> for State {
         if x >= 500.0 && x <= 560.0 && y >= 850.0 && y <= 890.0 {
             self.selected_color = Some(PieceColor::Black);
         }
+        if x >= 800.0 && x <= 860.0 && y >= 60.0 && y <= 100.0 {
+            let forfeit_package = NetworkMove {
+                from: (0, 0),
+                to: (0, 0),
+                promotion: None,
+                forfeit: true,
+                offer_draw: false,
+            };
+            let forfeit_package_bytes: Vec<u8> = forfeit_package.try_into().unwrap();
+            self.game_has_ended = true;
+            if let Some(stream) = self.client_stream.as_mut() {
+                match stream.write_all(&forfeit_package_bytes) {
+                    Ok(_) => match stream.flush() {
+                        Ok(_) => println!("Stream flushed successfully"),
+                        Err(e) => println!("Error flushing stream: {}", e),
+                    },
+                    Err(e) => println!("Error sending forfeit package: {}", e),
+                }
+            }
+        }
+        if x >= 800.0 && x <= 860.0 && y >= 110.0 && y <= 150.0 {
+            let offer_draw_package = NetworkMove {
+                from: (0, 0),
+                to: (0, 0),
+                promotion: None,
+                forfeit: false,
+                offer_draw: true,
+            };
+            let offer_draw_package_bytes: Vec<u8> = offer_draw_package.try_into().unwrap();
+            self.offer_draw_sent = true;
+            if let Some(stream) = self.client_stream.as_mut() {
+                match stream.write_all(&offer_draw_package_bytes) {
+                    Ok(_) => match stream.flush() {
+                        Ok(_) => println!("Stream flushed successfully"),
+                        Err(e) => println!("Error flushing stream: {}", e),
+                    },
+                    Err(e) => println!("Error sending offer draw package: {}", e),
+                }
+            }
+        }
+
+        if x >= 100.0 && x <= 210.0 && y >= 60.0 && y <= 100.0 {
+            self.offer_draw_received = false;
+            let ack_package = Ack {
+                ok: true,
+                end_state: Some(GameState::Draw),
+            };
+            self.game_has_ended = true;
+            let ack_package_bytes: Vec<u8> = ack_package.try_into().unwrap();
+            if let Some(stream) = self.client_stream.as_mut() {
+                match stream.write_all(&ack_package_bytes) {
+                    Ok(_) => match stream.flush() {
+                        Ok(_) => println!("Stream flushed successfully"),
+                        Err(e) => println!("Error flushing stream: {}", e),
+                    },
+                    Err(e) => println!("Error sending ack package: {}", e),
+                }
+            }
+        }
+        if x >= 220.0 && x <= 330.0 && y >= 60.0 && y <= 100.0 {
+            self.offer_draw_received = false;
+            let ack_package = Ack {
+                ok: false,
+                end_state: None,
+            };
+            let ack_package_bytes: Vec<u8> = ack_package.try_into().unwrap();
+            if let Some(stream) = self.client_stream.as_mut() {
+                match stream.write_all(&ack_package_bytes) {
+                    Ok(_) => match stream.flush() {
+                        Ok(_) => println!("Stream flushed successfully"),
+                        Err(e) => println!("Error flushing stream: {}", e),
+                    },
+                    Err(e) => println!("Error sending ack package: {}", e),
+                }
+            }
+        }
         if x >= 640.0
             && x <= 750.0
             && y >= 900.0
@@ -474,31 +496,21 @@ impl event::EventHandler<ggez::GameError> for State {
             && self.is_host.is_some()
             && self.is_host.unwrap() == false
         {
-            println!("Init game button pressed");
             let start_package = Start {
                 is_white: self.selected_color.unwrap() == PieceColor::White,
-                name: None,
+                name: Some("Alexander".to_string()),
                 fen: None,
                 time: None,
                 inc: None,
             };
             let start_package_bytes: Vec<u8> = start_package.try_into().unwrap();
-            println!(
-                "Peer address: {}",
-                self.client_stream.as_ref().unwrap().peer_addr().unwrap()
-            );
+
             if let Some(stream) = self.client_stream.as_mut() {
                 match stream.write_all(&start_package_bytes) {
-                    Ok(_) => {
-                        println!(
-                            "Init game package sent: {} bytes",
-                            start_package_bytes.len()
-                        );
-                        match stream.flush() {
-                            Ok(_) => println!("Stream flushed successfully"),
-                            Err(e) => println!("Error flushing stream: {}", e),
-                        }
-                    }
+                    Ok(_) => match stream.flush() {
+                        Ok(_) => println!("Stream flushed successfully"),
+                        Err(e) => println!("Error flushing stream: {}", e),
+                    },
                     Err(e) => println!("Error sending init game package: {}", e),
                 }
             } else {
@@ -519,7 +531,42 @@ impl event::EventHandler<ggez::GameError> for State {
         draw_color_picker(&mut canvas, ctx);
         // Draw an image.
         //canvas.draw(&self.image, graphics::DrawParam::new().dest(dst));
+        if self.start.is_some() {
+            let forfeit_text = Text::new("Forfeit");
+            let offer_draw_text = Text::new("Offer draw");
 
+            forfeit_text.draw(
+                &mut canvas,
+                graphics::DrawParam::new()
+                    .dest(glam::Vec2::new(820.0, 60.0))
+                    .z(100),
+            );
+            offer_draw_text.draw(
+                &mut canvas,
+                graphics::DrawParam::new()
+                    .dest(glam::Vec2::new(810.0, 110.0))
+                    .color(graphics::Color::BLACK)
+                    .z(100),
+            );
+            let forfeit_rect = graphics::Mesh::new_rounded_rectangle(
+                ctx,
+                graphics::DrawMode::fill(),
+                graphics::Rect::new(800.0, 50.0, 100.0, 40.0),
+                5.0,
+                graphics::Color::new(0.0, 0.0, 1.0, 1.0),
+            )?;
+
+            let offer_draw_rect = graphics::Mesh::new_rounded_rectangle(
+                ctx,
+                graphics::DrawMode::fill(),
+                graphics::Rect::new(800.0, 100.0, 100.0, 40.0),
+                5.0,
+                graphics::Color::new(0.0, 1.0, 0.0, 1.0),
+            )?;
+
+            forfeit_rect.draw(&mut canvas, graphics::DrawParam::default());
+            offer_draw_rect.draw(&mut canvas, graphics::DrawParam::default());
+        }
         if self.game_has_ended && self.board.get_game_result() == ChessResult::InProgress {
             Text::new("Game has ended. Press restart to start new game.").draw(
                 &mut canvas,
@@ -583,9 +630,39 @@ impl event::EventHandler<ggez::GameError> for State {
             draw_restart_button(&mut canvas, ctx, self.is_host);
         }
 
+        // Draw accept and reject buttons for draw offer
+        if self.offer_draw_received {
+            let accept_button = graphics::Mesh::new_rounded_rectangle(
+                ctx,
+                graphics::DrawMode::fill(),
+                graphics::Rect::new(100.0, 60.0, 100.0, 40.0),
+                5.0,
+                graphics::Color::new(0.0, 0.8, 0.0, 1.0),
+            )?;
+            let reject_button = graphics::Mesh::new_rounded_rectangle(
+                ctx,
+                graphics::DrawMode::fill(),
+                graphics::Rect::new(220.0, 60.0, 100.0, 40.0),
+                5.0,
+                graphics::Color::new(0.8, 0.0, 0.0, 1.0),
+            )?;
+
+            accept_button.draw(&mut canvas, graphics::DrawParam::default());
+            reject_button.draw(&mut canvas, graphics::DrawParam::default());
+
+            Text::new("Accept").draw(
+                &mut canvas,
+                graphics::DrawParam::new().dest(glam::Vec2::new(110.0, 70.0)),
+            );
+            Text::new("Reject").draw(
+                &mut canvas,
+                graphics::DrawParam::new().dest(glam::Vec2::new(250.0, 70.0)),
+            );
+        }
+
         for (index, piece_move) in self.past_moves.iter().enumerate() {
-            let text_position = glam::Vec2::new(900.0, 105.0 + ((index as f32) * 40.0));
-            let circle_position = glam::Vec2::new(880.0, 110.0 + ((index as f32) * 40.0));
+            let text_position = glam::Vec2::new(1000.0, 105.0 + ((index as f32) * 40.0));
+            let circle_position = glam::Vec2::new(980.0, 110.0 + ((index as f32) * 40.0));
             let circle_color = if piece_move.0 == PieceColor::Black {
                 Color::new(1.0, 1.0, 1.0, 1.0)
             } else {
@@ -673,6 +750,16 @@ impl event::EventHandler<ggez::GameError> for State {
                     if size > 0 {
                         match NetworkMove::try_from(&buf[..]) {
                             Ok(piece_move) => {
+                                if piece_move.forfeit {
+                                    self.game_has_ended = true;
+                                    self.client_stream = None;
+                                    return Ok(());
+                                }
+                                if piece_move.offer_draw {
+                                    self.offer_draw_received = true;
+                                    return Ok(());
+                                }
+
                                 let from = Square {
                                     file: File::from_idx(piece_move.from.0),
                                     rank: Rank::from_idx(piece_move.from.1),
@@ -774,7 +861,6 @@ impl event::EventHandler<ggez::GameError> for State {
                                         ok: is_legal,
                                         end_state,
                                     };
-                                    println!("Sending ack as host: {:?}", return_move_package);
                                     let return_move_package_bytes: Vec<u8> =
                                         return_move_package.try_into().unwrap();
                                     self.client_stream
@@ -788,7 +874,16 @@ impl event::EventHandler<ggez::GameError> for State {
                         }
                         match Ack::try_from(&buf[..]) {
                             Ok(ack) => {
-                                println!("Received ack: {:?}", ack);
+                                if self.offer_draw_sent {
+                                    if ack.ok {
+                                        self.game_has_ended = true;
+                                        self.client_stream = None;
+                                        self.offer_draw_sent = false;
+                                    } else {
+                                        self.offer_draw_sent = false;
+                                    }
+                                    return Ok(());
+                                }
                                 if self.is_host.is_some_and(|f| f == false) {
                                     if ack.end_state.is_some() {
                                         self.game_has_ended = true;
